@@ -1,0 +1,8 @@
+Note1: 
+Several model architectures are explicitly designed to trade off accuracy for improved performance or reduced energy consumption. Examples include:
+
+Dynamic Neural Networks, Anytime prediction models, Models with early-exit mechanisms (e.g., BranchyNet, Shallow-Deep Networks), Quantized or pruned variants of a base model.
+
+In such models, reducing the computational load—typically measured in floating-point operations (FLOPs)—can involve techniques such as skipping certain layers, operating at lower numerical precision, or terminating inference early. These adjustments often lead to reduced accuracy.
+
+However, in this work, we consider a different setting. We assume that the model is fixed and already trained, and its inference accuracy is constant (ResNet, MobileNet, YOLO). The number of FLOPs required for a single inference is thus also fixed. Under this assumption, increasing the FLOPs-per-second allocated to the model (e.g., through more powerful hardware or parallelization) reduces inference time, but does not affect accuracy.
