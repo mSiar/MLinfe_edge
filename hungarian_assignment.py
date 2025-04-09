@@ -17,7 +17,12 @@ def assign_requests_to_replicas_with_hungarian(request_sets, replicas):
             if finish_time <= req.qos_response_time and \
                     (sum(req.estimated_accuracy) + rep.model.accuracy) >= (
                     req.num_completed_request + 1) * req.required_accuracy:
-                cost_matrix[i][j] = finish_time  # or est_exec_time or -accuracy if maximizing
+                cost_matrix[i][j] = finish_time  # minimizes total finish time across all assignments
+                #if want to maximize accuracy: cost_matrix[i][j] = -rep.model.accuracy
+                #if include energy in cost
+                #energy = rep.allocated_flops * rep.edge_node.flops_watt
+                #cost_matrix[i][j] = 0.7 * finish_time + 0.3 * energy  # weighted sum
+
 
     # Hungarian requires finite values — if all entries are inf, we cannot assign
     if np.isinf(cost_matrix).all():
@@ -103,3 +108,4 @@ def decide_allocation(self, request_sets, edge_nodes, models, completed_requests
                     req_set.estimated_accuracy.append(accuracy)
                     req_set.finish_time = max(req_set.finish_time, finish)
                     req_set.num_completed_request += 1
+
