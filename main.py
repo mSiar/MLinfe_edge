@@ -15,12 +15,11 @@ class MLModel:
 
 
 class Replica:
-    # DONE: Change it according to the relation of flops and energy consumption per flop equation
 
     def __init__(self, allocated_flops, model: MLModel, edge_node):
         self.edge_node = edge_node
         self.model = model
-        self.allocated_flops = allocated_flops  #(model.required_flops/(sum ml.required_flops for ml in MLModel))*
+        self.allocated_flops = allocated_flops  
         self.busy_until = 0
         
 
@@ -44,7 +43,7 @@ class EdgeNode:
         self.total_flops_capacity = flops_capacity
         self.flops_watt = flops_watt
         self.total_energy_limit = energy_limit
-        self.available_flops = flops_capacity*UTILIZATION_THRESHOLD   ## CHECK: DO WE NEED multiplying by UTILIZATION_THRESHOLD ??
+        self.available_flops = flops_capacity*UTILIZATION_THRESHOLD  
         self.available_energy = energy_limit
         self.replicas = []
         self.models = models
@@ -66,7 +65,7 @@ class EdgeNode:
         used_flops = 0
         for replica in self.replicas:
             used_flops += replica.allocated_flops
-        return used_flops  ## CHECK: AM I NEED UTILIZATION_THRESHOLD ??
+        return used_flops 
 
     def used_energy(self):
         return self.total_energy_limit - self.available_energy
@@ -74,7 +73,7 @@ class EdgeNode:
     def add_replica(self, model): 
         total_model_flops = sum(m.required_flops for m in self.models)
         model_weight = model.required_flops / total_model_flops
-        flops = model_weight*self.total_flops_capacity*UTILIZATION_THRESHOLD ## CHECK: AM I NEED UTILIZATION_THRESHOLD ??
+        flops = model_weight*self.total_flops_capacity*UTILIZATION_THRESHOLD 
         estimated_energy = flops* self.flops_watt
         if self.can_allocate(flops) and self.available_energy >= estimated_energy:
             replica = Replica(flops, model, self)
@@ -86,7 +85,7 @@ class EdgeNode:
 
         return None
 
-    def remove_idle_replicas(self, current_time): #####?????? HOW 
+    def remove_idle_replicas(self, current_time):
         active_replicas = []
         for rep in self.replicas:
             if rep.busy_until > current_time:
@@ -110,7 +109,7 @@ class DecisionMaker_local:
     def __init__(self):
         pass
     
-    def decide_allocation(self, request_sets, edge_nodes, models, completed_requests):#, rejected_requests):
+    def decide_allocation(self, request_sets, edge_nodes, models, completed_requests):
         replicas_list = []
         total_model_flops = sum(m.required_flops for m in models)
         
@@ -274,6 +273,41 @@ class DecisionMaker_hungarian:
                         req_set.num_completed_request += 1
 
 
+class DecisionMaker_random:
+    def __init__(self):
+        pass
+    
+    def decide_allocation(self, request_sets, edge_nodes, models, completed_requests):
+        replicas_list = []
+        max_attempts = sum(NUM_REQUEST-r.num_completed_request for r in request_sets)
+        total_model_flops = sum(m.required_flops for m in models)
+
+        attempts = 0
+        while(attempts<max_attempts):
+            req = random.choice(request_sets)
+            if req.num_completed_request >= NUM_REQUEST:
+                attempts += 1
+                continue
+
+            model = random.choice(models)
+            node = random.choice(edge_nodes)
+
+            replica = node.add_replica(model)
+
+            if not replica:
+                attempts += 1
+                continue
+
+            start_time, finish_time, acc = replica.process_request(req.arrival_time)
+            if finish_time <= req.qos_response_time and acc + sum(req.estimated_accuracy) >= req.required_accuracy * (req.num_completed_request + 1):
+                completed_requests.append((req.arrival_time, start_time, finish_time))
+                req.estimated_accuracy.append(acc)
+                req.finish_time = max(req.finish_time, finish_time)
+                req.num_completed_request += 1
+
+            attempts += 1
+
+
 
 def decide_provisioning(dominated_request, inter_arrival_times, ctn, edge_nodes):
         
@@ -297,10 +331,11 @@ def decide_provisioning(dominated_request, inter_arrival_times, ctn, edge_nodes)
             rho = lambda_rate / (num_replica * mu)
             if rho >= 1:
                 continue
-            wq = ((ca2**2 + cs2**2) / 2) * (rho ** (np.sqrt(2 * (num_replica + 1)) - 1)) / (num_replica * (1 - rho)) / mu # Formula changed
+            wq = ((ca2**2 + cs2**2) / 2) * (rho ** (np.sqrt(2 * (num_replica + 1)) - 1)) / (num_replica * (1 - rho)) / mu 
             wait_time = wq + 1 / mu
             req = min(math.floor((wait_time+ctn["service_time"])/num_replica), NUM_REQUEST-dominated_request.num_completed_request)
-            if(wait_time+ctn["service_time"]<=dominated_request.qos_response_time and num_replica <=max_replicas and req+dominated_request.num_completed_request<NUM_REQUEST):  ##?? CHECK:  dont we need UTILIZATION_THRESHOLD here??
+            
+            if(wait_time+ctn["service_time"]<=dominated_request.qos_response_time and num_replica <=max_replicas and req+dominated_request.num_completed_request==NUM_REQUEST and lambda_rate/((num_replica+1)*mu)<=UTILIZATION_THRESHOLD): 
                 return num_replica
     
         return num_replica
@@ -317,15 +352,6 @@ class Simulator:
         self.completed_requests = []
         self.decision_maker = decision_maker
 
-    
-    # def generate_requests(self):
-    #     current_time = 0
-    #     while current_time < self.duration:
-    #         inter_arrival = self.arrival_rate_fn()
-    #         current_time += inter_arrival
-    #         required_accuracy = round(random.uniform(MIN_REQUIRED_ACCURACY, MAX_REQUIRED_ACCURACY),2)   
-    #         qos_response_time = current_time+round(random.uniform(MIN_RESPONSE_TIME, MAX_RESPONSE_TIME),2)  
-    #         self.request_sets.append(Request_set(current_time, required_accuracy, qos_response_time, 0, [], 0))
 
 
     def run(self):
@@ -338,17 +364,17 @@ class Simulator:
             start_sim_time += TIME_SLOT
 
 
-    def plot_metrics(self, delays,  diff_time, diff_avg_acc):
-        if delays:
-            plt.figure(figsize=(10, 5))
-            plt.hist(delays, bins=20, alpha=0.7, edgecolor='black')
-            plt.title("Histogram of Request Response Times")
-            plt.xlabel("Response Time (seconds)")
-            plt.ylabel("Number of Requests")
-            plt.grid(True)
-            plt.show()
-        else:
-            print("No delays...")
+    def plot_metrics(self, delays,  diff_time, diff_avg_acc, approach):
+        # if delays:
+        #     plt.figure(figsize=(10, 5))
+        #     plt.hist(delays, bins=20, alpha=0.7, edgecolor='black')
+        #     plt.title("Histogram of Request Response Times")
+        #     plt.xlabel("Response Time (seconds)")
+        #     plt.ylabel("Number of Requests")
+        #     plt.grid(True)
+        #     plt.show()
+        # else:
+        #     print("No delays...")
 
             
         # Comparison of qos_response_time vs finish_time
@@ -362,7 +388,7 @@ class Simulator:
         plt.bar(indices1 + width/2, finish_times, width=width, label='Response Time', color='salmon')
         plt.xlabel("Request Set Index")
         plt.ylabel("Time (seconds)")
-        plt.title("QoS Deadline vs Actual Finish Time per Request Set")
+        plt.title(f"QoS Deadline vs Actual Finish Time per Request Set in approach {approach}")
         plt.legend()
         plt.grid(True, axis='y', linestyle='--', alpha=0.7)
         plt.tight_layout()
@@ -379,7 +405,7 @@ class Simulator:
             plt.bar(indices2 + width/2, avg_accuracy, width=width, label='Estimated avg accuracy', color='salmon')
             plt.xlabel("Request Set Index")
             plt.ylabel("Accuracy")
-            plt.title("QoS accuracy vs estimated avg accuracy for Request Sets with completed requests")
+            plt.title(f"QoS accuracy vs estimated avg accuracy for Request Sets with completed requests in approach {approach}")
             plt.legend()
             plt.grid(True, axis='y', linestyle='--', alpha=0.7)
             plt.tight_layout()
@@ -388,7 +414,7 @@ class Simulator:
         
             
 
-    def print_stats(self):
+    def print_stats(self, apprach):
         total = NUM_REQUEST*len(self.request_sets)
         print("first request set:  ", self.request_sets[0])
         completed = sum([req.num_completed_request for req in self.request_sets])
@@ -421,7 +447,7 @@ class Simulator:
             flops_util = used_flops / (UTILIZATION_THRESHOLD * node.total_flops_capacity)
             print(f"Node {node.id} FLOPs Utilization: {flops_util:.2%}")
 
-        self.plot_metrics(delays, diff_time, diff_avg_acc)
+        self.plot_metrics(delays, diff_time, diff_avg_acc, apprach)
 
 
 def main():
@@ -447,12 +473,12 @@ def main():
             for i in range(edge_num)
         ]
 
-    edge_num = 3
+    edge_num = 5
 
-    arrival_fn = lambda: random.uniform(1.0, 3.0) # requests' arrival rate
+    arrival_fn = lambda: random.uniform(1.0, 1.5) # requests' arrival rate
 
     base_requests = []
-    duration = 60
+    duration = 800
     current_time = 0
     while current_time < duration:
         inter_arrival = arrival_fn()
@@ -464,12 +490,20 @@ def main():
     sim1 = Simulator(edge_nodes=build_nodes(edge_num), models=models, duration=60, decision_maker=DecisionMaker_local())
     sim1.request_sets = copy.deepcopy(base_requests)
     sim1.run()
-    sim1.print_stats()
+    approach = "Greedy"
+    sim1.print_stats(approach)
 
     sim2 = Simulator(edge_nodes=build_nodes(edge_num), models=models, duration=60, decision_maker = DecisionMaker_hungarian())
     sim2.request_sets = copy.deepcopy(base_requests)
     sim2.run()
-    sim2.print_stats()
+    approach = "Hungarian"
+    sim2.print_stats(approach)
+
+    sim3 = Simulator(edge_nodes=build_nodes(edge_num), models=models, duration=60, decision_maker = DecisionMaker_random())
+    sim3.request_sets = copy.deepcopy(base_requests)
+    sim3.run()
+    approach = "Random"
+    sim3.print_stats(approach)
 
 if __name__ == "__main__":
     main()
