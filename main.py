@@ -1,4 +1,7 @@
 import random
+import this
+import time
+
 import numpy as np
 import pandas as pd
 import math
@@ -168,113 +171,257 @@ class DecisionMaker_local:
 class DecisionMaker_hungarian:
     def __init__(self):
         pass
-        
+
+    def compute_cost(self, replica, request):
+        est_exec_time = replica.estimate_exec_time()
+        start_time = max(request.arrival_time, replica.busy_until)
+        finish_time = start_time + est_exec_time
+
+        projected_accuracy = sum(request.estimated_accuracy) + replica.model.accuracy
+        accuracy_budget = (request.num_completed_request + 1) * request.required_accuracy
+
+        # Check feasibility
+        if finish_time > request.qos_response_time + 1.0 or projected_accuracy < accuracy_budget:
+            return np.inf
+
+        # ---- QoS/Urgency-aware cost ----
+        slack = max(1e-3, request.qos_response_time - finish_time)
+        urgency_penalty = 1.0 / slack  # higher when tight deadline
+
+        # ---- Energy + node utilization penalty ----
+        energy = replica.allocated_flops * replica.edge_node.flops_watt
+        utilization_ratio = replica.edge_node.used_flops() / replica.edge_node.total_flops_capacity
+        load_penalty = 2.0 * utilization_ratio  # Weight can be tuned
+
+        # ---- Accuracy gain (for progress) ----
+        accuracy_gain = projected_accuracy - sum(request.estimated_accuracy)
+        value = accuracy_gain / (energy + 1e-6)
+
+        # ---- Final cost (lower is better) ----
+        cost = -value + urgency_penalty + load_penalty
+        return cost
+
     def assign_requests_to_replicas_with_hungarian(self, request_sets, replicas):
         num_replicas = len(replicas)
         num_requests = len(request_sets)
-    
         cost_matrix = np.full((num_replicas, num_requests), fill_value=np.inf)
-    
-        for i, rep in enumerate(replicas):
-            for j, req in enumerate(request_sets):
-                est_exec_time = rep.estimate_exec_time()
-                start_time = max(req.arrival_time, rep.busy_until)
-                finish_time = start_time + est_exec_time
-    
-                if finish_time <= req.qos_response_time and \
-                        (sum(req.estimated_accuracy) + rep.model.accuracy) >= (
-                        req.num_completed_request + 1) * req.required_accuracy:
-                    cost_matrix[i][j] = finish_time  # minimizes total finish time across all assignments
-                    #if want to maximize accuracy: cost_matrix[i][j] = -rep.model.accuracy
-                    #if include energy in cost
-                    #energy = rep.allocated_flops * rep.edge_node.flops_watt
-                    #cost_matrix[i][j] = 0.7 * finish_time + 0.3 * energy  # weighted sum
-    
-    
-        # Hungarian requires finite values — if all entries are inf, we cannot assign
-        if np.isinf(cost_matrix).all():
+
+        for i, replica in enumerate(replicas):
+            for j, request in enumerate(request_sets):
+                cost_matrix[i][j] = self.compute_cost(replica, request)
+
+        if np.all(np.isinf(cost_matrix)):
             return []
-    
-        row_ind, col_ind = linear_sum_assignment(cost_matrix)
-    
-        assignments = []
-        for r, c in zip(row_ind, col_ind):
-            if cost_matrix[r][c] != np.inf:
-                assignments.append((r, c))  # (replica index, request index)
-    
-        return assignments
-    
-    
+
+        row_mask = ~np.all(np.isinf(cost_matrix), axis=1)
+        col_mask = ~np.all(np.isinf(cost_matrix), axis=0)
+
+        if not row_mask.any() or not col_mask.any():
+            return []
+
+        reduced_cost_matrix = cost_matrix[np.ix_(row_mask, col_mask)]
+        if reduced_cost_matrix.size == 0 or not np.all(np.isfinite(reduced_cost_matrix)):
+            return []
+
+        reduced_row_ind, reduced_col_ind = linear_sum_assignment(reduced_cost_matrix)
+        row_indices = np.where(row_mask)[0]
+        col_indices = np.where(col_mask)[0]
+
+        return [(row_indices[r], col_indices[c]) for r, c in zip(reduced_row_ind, reduced_col_ind)]
+
     def decide_allocation(self, request_sets, edge_nodes, models, completed_requests):
         replicas_list = []
         total_model_flops = sum(m.required_flops for m in models)
-    
+
         for node in edge_nodes:
             for model in models:
                 model_weight = model.required_flops / total_model_flops
-                flops = model_weight * node.total_flops_capacity * UTILIZATION_THRESHOLD  # CHECK: UTILIZATION_THRESHOLD ?
+                flops = model_weight * node.total_flops_capacity * UTILIZATION_THRESHOLD
                 energy = flops * node.flops_watt
-    
-                replicas_list.append({"edge_id": node.id,  # List of all potential containers CTN_j,l the system
-                                      "model": model,
-                                      "accuracy": model.accuracy,
-                                      "service_time": model.required_flops / flops,
-                                      "replica_flops": flops,
-                                      "energy": energy,
-                                      "current_replicas": len(node.replicas)
-                                      })
-        replicas_list.sort(key=lambda r: r["energy"])
-    
+                replicas_list.append({
+                    "edge_id": node.id,
+                    "model": model,
+                    "accuracy": model.accuracy,
+                    "service_time": model.required_flops / flops,
+                    "replica_flops": flops,
+                    "energy": energy,
+                })
+
+        #replicas_list.sort(key=lambda r: r["energy"] / r["accuracy"])
+        replicas_list.sort(
+            key=lambda r: (r["energy"] / r["accuracy"]) + edge_nodes[r["edge_id"]].used_flops() / edge_nodes[
+                r["edge_id"]].total_flops_capacity)
+
+        uncompleted_requests = [r for r in request_sets if r.num_completed_request < NUM_REQUEST]
+
         for ctn in replicas_list:
-            matching_requests = [r for r in request_sets if
-                                 (NUM_REQUEST - r.num_completed_request) > 0 and sum(r.estimated_accuracy) + ctn[
-                                     "accuracy"] >= (
-                                             r.num_completed_request + 1) * r.required_accuracy]  # request sets with some uncompleted requests
-    
+            edge = edge_nodes[ctn["edge_id"]]
+            matching_requests = [
+                r for r in uncompleted_requests
+                if sum(r.estimated_accuracy) + ctn["accuracy"] >=
+                   (r.num_completed_request + 1) * r.required_accuracy
+            ]
             if not matching_requests:
-                edge_nodes[ctn["edge_id"]].remove_idle_replicas(
-                    max(req.arrival_time for req in request_sets))  # just removing idle replicas from container
-            else:
-                edge_nodes[ctn["edge_id"]].remove_idle_replicas(
-                    max(req.arrival_time for req in matching_requests))  # remove_idle_replicas
-                dominated_request = max(matching_requests, key=lambda r: (
-                                                                                     NUM_REQUEST - r.num_completed_request) / r.qos_response_time)  # The set with maximum number of uncompleted requests and minimum deadline
-    
-                arrivals = [r.arrival_time for r in matching_requests]
-                if len(arrivals) >= 2:
-                    inter_arrival_times = [arrivals[i] - arrivals[i - 1] for i in range(1, len(arrivals))]
-                elif len(arrivals) == 1:
-                    inter_arrival_times = [1.0] #avoid divide by zero by small positive value
-                num_replica = decide_provisioning(dominated_request, inter_arrival_times, ctn,
-                                                       edge_nodes)  # Provisioning decision
-    
-                if num_replica > 0:
-                    for _ in range(num_replica):
-                        edge_nodes[ctn["edge_id"]].add_replica(ctn["model"])
-    
-        # Collect all available replicas across nodes
-        available_replicas = []
-        for node in edge_nodes:
-            available_replicas.extend(rep for rep in node.replicas if rep.busy_until <= max(req.arrival_time for req in matching_requests))
-    
-            # Use Hungarian algorithm to assign available replicas to request sets
-        assignments = self.assign_requests_to_replicas_with_hungarian(request_sets, available_replicas)
-    
-            # Process requests based on optimal assignments
+                continue
+
+            arrivals = [r.arrival_time for r in matching_requests]
+            inter_arrival_times = [arrivals[i] - arrivals[i - 1] for i in range(1, len(arrivals))] if len(arrivals) > 1 else [1.0]
+            dominated_request = max(matching_requests, key=lambda r: (NUM_REQUEST - r.num_completed_request) / r.qos_response_time)
+
+            num_replica = self.decide_provisioning(dominated_request, inter_arrival_times, ctn, edge_nodes)
+            for _ in range(num_replica):
+                edge.add_replica(ctn["model"])
+
+        # Assignment phase
+        available_replicas = [
+            rep for node in edge_nodes for rep in node.replicas
+            if rep.busy_until <= max(r.arrival_time for r in request_sets)
+        ]
+        uncompleted_requests = [r for r in request_sets if r.num_completed_request < NUM_REQUEST]
+        assignments = self.assign_requests_to_replicas_with_hungarian(uncompleted_requests, available_replicas)
+
         for rep_idx, req_idx in assignments:
             replica = available_replicas[rep_idx]
-            req_set = matching_requests[req_idx]
-    
+            req_set = uncompleted_requests[req_idx]
             start, finish, accuracy = replica.process_request(req_set.arrival_time)
-    
-            if finish <= req_set.qos_response_time and \
-                        accuracy + sum(req_set.estimated_accuracy) >= req_set.required_accuracy * (
-                        req_set.num_completed_request + 1):
-                        completed_requests.append((req_set.arrival_time, start, finish))
-                        req_set.estimated_accuracy.append(accuracy)
-                        req_set.finish_time = max(req_set.finish_time, finish)
-                        req_set.num_completed_request += 1
 
+            if finish <= req_set.qos_response_time + 1.0 and \
+                    accuracy + sum(req_set.estimated_accuracy) >= req_set.required_accuracy * (req_set.num_completed_request + 1):
+                completed_requests.append((req_set.arrival_time, start, finish))
+                req_set.estimated_accuracy.append(accuracy)
+                req_set.finish_time = max(req_set.finish_time, finish)
+                req_set.num_completed_request += 1
+
+    def decide_provisioning(self, dominated_request, inter_arrival_times, ctn, edge_nodes):
+        edge = edge_nodes[ctn["edge_id"]]
+        max_replicas = min(
+            math.floor((edge.total_flops_capacity - edge.used_flops()) / ctn["replica_flops"]),
+            math.floor((edge.total_energy_limit - edge.used_energy()) / ctn["energy"])
+        )
+
+        service_time = ctn["service_time"]
+        lambda_rate = 1 / np.mean(inter_arrival_times)
+        mu = 1 / service_time
+        var_inter = np.var(inter_arrival_times) if len(inter_arrival_times) > 1 else 0
+        ca2 = var_inter / np.mean(inter_arrival_times)
+        cs2 = mu
+
+        for num_replica in range(1, max_replicas + 1):
+            rho = lambda_rate / (num_replica * mu)
+            if rho >= 1:
+                continue
+            wq = ((ca2 ** 2 + cs2 ** 2) / 2) * (rho ** (np.sqrt(2 * (num_replica + 1)) - 1)) / (num_replica * (1 - rho)) / mu
+            wait_time = wq + 1 / mu
+            req = min(math.floor((wait_time + ctn["service_time"]) / num_replica),
+                      NUM_REQUEST - dominated_request.num_completed_request)
+            if wait_time + ctn["service_time"] <= dominated_request.qos_response_time + 1.0 and req >= 1 and \
+                    lambda_rate / ((num_replica + 1) * mu) <= UTILIZATION_THRESHOLD:
+                return num_replica
+        return 0
+
+
+class DecisionMaker_local_priority:
+    def __init__(self):
+        pass
+
+    def decide_allocation(self, request_sets, edge_nodes, models, completed_requests):
+        replicas_list = []
+        total_model_flops = sum(m.required_flops for m in models)
+
+        for node in edge_nodes:
+            for model in models:
+                model_weight = model.required_flops / total_model_flops
+                flops = model_weight * node.total_flops_capacity * UTILIZATION_THRESHOLD
+                energy = flops * node.flops_watt
+
+                replicas_list.append({
+                    "edge_id": node.id,
+                    "model": model,
+                    "accuracy": model.accuracy,
+                    "service_time": model.required_flops / flops,
+                    "replica_flops": flops,
+                    "energy": energy,
+                    "current_replicas": len(node.replicas)
+                })
+
+        replicas_list.sort(key=lambda r: r["energy"])
+
+        for ctn in replicas_list:
+            matching_requests = [
+                r for r in request_sets
+                if (NUM_REQUEST - r.num_completed_request) > 0 and
+                sum(r.estimated_accuracy) + ctn["accuracy"] >=
+                (r.num_completed_request + 1) * r.required_accuracy
+            ]
+
+            if not matching_requests:
+                edge_nodes[ctn["edge_id"]].remove_idle_replicas(
+                    max(req.arrival_time for req in request_sets)
+                )
+                continue
+
+            matching_requests.sort(
+                key=lambda r: (NUM_REQUEST - r.num_completed_request) / (r.qos_response_time + 1e-6),
+                reverse=True
+            )
+
+            edge_nodes[ctn["edge_id"]].remove_idle_replicas(
+                max(req.arrival_time for req in matching_requests)
+            )
+
+            dominated_request = matching_requests[0]
+            arrivals = [r.arrival_time for r in matching_requests]
+            inter_arrival_times = [arrivals[i] - arrivals[i - 1] for i in range(1, len(arrivals))] if len(arrivals) > 1 else [1.0]
+
+            num_replica = self.decide_provisioning(dominated_request, inter_arrival_times, ctn, edge_nodes)
+            if num_replica <= 0:
+                continue
+
+            for _ in range(num_replica):
+                edge_nodes[ctn["edge_id"]].add_replica(ctn["model"])
+
+            for r_set in matching_requests:
+                for replica in edge_nodes[ctn["edge_id"]].replicas:
+                    served = 0
+                    for _ in range(NUM_REQUEST - r_set.num_completed_request):
+                        start, finish, accuracy = replica.process_request(r_set.arrival_time)
+                        if finish <= r_set.qos_response_time and \
+                                accuracy + sum(r_set.estimated_accuracy) >= r_set.required_accuracy * (r_set.num_completed_request + 1):
+                            completed_requests.append((r_set.arrival_time, start, finish))
+                            r_set.estimated_accuracy.append(accuracy)
+                            r_set.finish_time = max(r_set.finish_time, finish)
+                            r_set.num_completed_request += 1
+                            served += 1
+                        if served >= 3:  # Cap: only serve 3 subrequests per replica/request
+                            break
+
+    def decide_provisioning(self, dominated_request, inter_arrival_times, ctn, edge_nodes):
+        edge = edge_nodes[ctn["edge_id"]]
+        max_replicas = min(
+            math.floor((edge.total_flops_capacity - edge.used_flops()) / ctn["replica_flops"]),
+            math.floor((edge.total_energy_limit - edge.used_energy()) / ctn["energy"])
+        )
+
+        service_time = ctn["service_time"]
+        lambda_rate = 1 / np.mean(inter_arrival_times)
+        mu = 1 / service_time
+        var_inter = np.var(inter_arrival_times) if len(inter_arrival_times) > 1 else 0
+        ca2 = var_inter / np.mean(inter_arrival_times)
+        cs2 = mu
+
+        for num_replica in range(1, max_replicas + 1):
+            rho = lambda_rate / (num_replica * mu)
+            if rho >= 1:
+                continue
+            wq = ((ca2 ** 2 + cs2 ** 2) / 2) * (rho ** (np.sqrt(2 * (num_replica + 1)) - 1)) / (num_replica * (1 - rho)) / mu
+            wait_time = wq + 1 / mu
+            req = min(math.floor((wait_time + ctn["service_time"]) / num_replica),
+                      NUM_REQUEST - dominated_request.num_completed_request)
+            if wait_time + ctn["service_time"] <= dominated_request.qos_response_time + 1.0 and req >= 1 and \
+                    lambda_rate / ((num_replica + 1) * mu) <= UTILIZATION_THRESHOLD:
+                return num_replica
+
+        return 0
 
 class DecisionMaker_random:
     def __init__(self):
@@ -354,18 +501,29 @@ class Simulator:
         self.request_sets = []
         self.completed_requests = []
         self.decision_maker = decision_maker
+        self.decision_times = []
 
 
 
     def run(self):
         start_sim_time = 0
+        decision_times = []
         # self.generate_requests()
         maximum_arrivals = max(st.arrival_time for st in self.request_sets)
         while(start_sim_time<maximum_arrivals):
             current_requests = [st for st in self.request_sets if st.arrival_time>start_sim_time and st.arrival_time<start_sim_time+TIME_SLOT]
             if current_requests:
-                self.decision_maker.decide_allocation(current_requests, self.edge_nodes, self.models, self.completed_requests)
+
+            	#measure start time
+            	start_decision = time.time()
+            	self.decision_maker.decide_allocation(current_requests, self.edge_nodes, self.models, self.completed_requests)
+
+            	#end time
+            	end_decision = time.time()
+            	decision_times.append((end_decision - start_decision))
+
             start_sim_time += TIME_SLOT
+        self.decision_times = decision_times
 
 
     def plot_metrics(self, delays,  diff_time, diff_avg_acc, approach):
@@ -451,6 +609,11 @@ class Simulator:
             flops_util = used_flops / (UTILIZATION_THRESHOLD * node.total_flops_capacity)
             print(f"Node {node.id} FLOPs Utilization: {flops_util:.2%}")
 
+        if hasattr(self, 'decision_times'):
+            avg_decision_time = sum(self.decision_times) / len(self.decision_times)
+            perc_90_decision = np.percentile(self.decision_times, 90)
+            print(f"Average Decision Time per Slot: {avg_decision_time:.4f} seconds")
+            print(f"90th Percentile Decision Time: {perc_90_decision:.4f} seconds")
         self.plot_metrics(delays, diff_time, diff_avg_acc, apprach)
 
 
@@ -521,7 +684,7 @@ def main():
     #     base_requests.append(Request_set(1, required_accuracy, qos_response_time, 0, [], 0))
     
    
-    # duration = 800
+    # duration = 40
     # current_time = 0
     # while current_time < duration:
     #     inter_arrival = arrival_fn()
@@ -536,17 +699,17 @@ def main():
     approach = "Greedy"
     sim1.print_stats(approach)
 
-    sim2 = Simulator(edge_nodes=build_nodes(edge_num), models=models, duration=60, decision_maker = DecisionMaker_hungarian())
+    sim2 = Simulator(edge_nodes=build_nodes(edge_num), models=models, duration=60, decision_maker = DecisionMaker_local_priority())
     sim2.request_sets = copy.deepcopy(base_requests)
     sim2.run()
-    approach = "Hungarian"
+    approach = "Priority"
     sim2.print_stats(approach)
 
-    sim3 = Simulator(edge_nodes=build_nodes(edge_num), models=models, duration=60, decision_maker = DecisionMaker_random())
-    sim3.request_sets = copy.deepcopy(base_requests)
-    sim3.run()
-    approach = "Random"
-    sim3.print_stats(approach)
+    #sim3 = Simulator(edge_nodes=build_nodes(edge_num), models=models, duration=60, decision_maker = DecisionMaker_random())
+    #sim3.request_sets = copy.deepcopy(base_requests)
+    #sim3.run()
+    #approach = "Random"
+    #sim3.print_stats(approach)
 
 if __name__ == "__main__":
     main()
