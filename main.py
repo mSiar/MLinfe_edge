@@ -658,7 +658,7 @@ def main():
     sim2 = Simulator(edge_nodes=build_nodes(edge_num), models=models, duration=60, decision_maker = DecisionMaker_local_priority())
     sim2.request_sets = copy.deepcopy(base_requests)
     sim2.run()
-    approach = "Hungarian"
+    approach = "Priority"
     sim2.print_stats(approach)
 
     #sim3 = Simulator(edge_nodes=build_nodes(edge_num), models=models, duration=60, decision_maker = DecisionMaker_random())
