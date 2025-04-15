@@ -1,7 +1,10 @@
 import random
 import numpy as np
+import pandas as pd
 import math
 import copy
+import csv
+from itertools import islice
 import matplotlib.pyplot as plt
 from scipy.optimize import linear_sum_assignment
 from setting import NUM_REQUEST, UTILIZATION_THRESHOLD, MIN_REQUIRED_ACCURACY, MAX_REQUIRED_ACCURACY, MIN_RESPONSE_TIME, MAX_RESPONSE_TIME, TIME_SLOT, FLOPS, FLOPS_WATT
@@ -360,7 +363,8 @@ class Simulator:
         maximum_arrivals = max(st.arrival_time for st in self.request_sets)
         while(start_sim_time<maximum_arrivals):
             current_requests = [st for st in self.request_sets if st.arrival_time>start_sim_time and st.arrival_time<start_sim_time+TIME_SLOT]
-            self.decision_maker.decide_allocation(current_requests, self.edge_nodes, self.models, self.completed_requests)
+            if current_requests:
+                self.decision_maker.decide_allocation(current_requests, self.edge_nodes, self.models, self.completed_requests)
             start_sim_time += TIME_SLOT
 
 
@@ -474,18 +478,57 @@ def main():
         ]
 
     edge_num = 5
-
-    arrival_fn = lambda: random.uniform(1.0, 1.5) # requests' arrival rate
-
+    arrivals = set()
     base_requests = []
-    duration = 800
-    current_time = 0
-    while current_time < duration:
-        inter_arrival = arrival_fn()
-        current_time += inter_arrival
-        required_accuracy = round(random.uniform(MIN_REQUIRED_ACCURACY, MAX_REQUIRED_ACCURACY), 2)
-        qos_response_time = current_time + round(random.uniform(MIN_RESPONSE_TIME, MAX_RESPONSE_TIME), 2)
-        base_requests.append(Request_set(current_time, required_accuracy, qos_response_time, 0, [], 0))
+
+    with open("time_stamps_alibaba.csv", newline='') as file:
+        alibaba_traces = csv.reader(file)
+    
+        for row in islice(alibaba_traces, 0, None, 50):
+            try:
+                row = [int(item.strip()) for item in row]
+            except ValueError:
+                continue
+    
+            if row[0] in arrivals:
+                continue
+    
+            arrivals.add(row[0])
+            required_accuracy = round(random.uniform(MIN_REQUIRED_ACCURACY, MAX_REQUIRED_ACCURACY), 2)
+            qos_response_time = row[0] + round(random.uniform(MIN_RESPONSE_TIME, MAX_RESPONSE_TIME), 2)
+            base_requests.append(Request_set(row[0], required_accuracy, qos_response_time, 0, [], 0))
+
+
+
+    #arrival_fn = lambda: random.uniform(1.0, 1.5) # requests' arrival rate
+
+    # file = open("time_stamps_alibaba.csv")
+    # alibaba_traces = csv.reader(file)
+
+    # base_requests = []
+    # arrivals = set()
+    # for row in alibaba_traces:
+    #     if all(item.isdigit() for item in row):
+    #         row = [int(item) for item in row]
+    #     else: 
+    #         continue
+            
+    #     if row[0] in arrivals:
+    #         continue
+    #     arrivals.add(row[0])
+    #     required_accuracy = round(random.uniform(MIN_REQUIRED_ACCURACY, MAX_REQUIRED_ACCURACY), 2)
+    #     qos_response_time = 1 + round(random.uniform(MIN_RESPONSE_TIME, MAX_RESPONSE_TIME), 2)
+    #     base_requests.append(Request_set(1, required_accuracy, qos_response_time, 0, [], 0))
+    
+   
+    # duration = 800
+    # current_time = 0
+    # while current_time < duration:
+    #     inter_arrival = arrival_fn()
+    #     current_time += inter_arrival
+    #     required_accuracy = round(random.uniform(MIN_REQUIRED_ACCURACY, MAX_REQUIRED_ACCURACY), 2)
+    #     qos_response_time = current_time + round(random.uniform(MIN_RESPONSE_TIME, MAX_RESPONSE_TIME), 2)
+    #     base_requests.append(Request_set(current_time, required_accuracy, qos_response_time, 0, [], 0))
 
     sim1 = Simulator(edge_nodes=build_nodes(edge_num), models=models, duration=60, decision_maker=DecisionMaker_local())
     sim1.request_sets = copy.deepcopy(base_requests)
