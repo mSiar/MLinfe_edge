@@ -307,7 +307,7 @@ class DecisionMaker_hungarian:
                 completed_requests.append((req_set.arrival_time, start, finish))
                 response_time = finish - req_set.arrival_time
                 response_logs.append({
-                    "request_set_id": request_sets.id,
+                    "request_set_id": req_set.id,
                     "arrival_time": req_set.arrival_time,
                     "start_time": start,
                     "finish_time": finish,
