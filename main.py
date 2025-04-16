@@ -104,7 +104,8 @@ class EdgeNode:
         self.replicas = active_replicas
 
 class Request_set:
-    def __init__(self, arrival_time, qos_accuracy, qos_response_time, num_completed_request, estimated_accuracy, finish_time):  #num_request is the number of assigned requests in the set,       estimated_accuracy is the accuracy of the ---> initialized []
+    def __init__(self, id, arrival_time, qos_accuracy, qos_response_time, num_completed_request, estimated_accuracy, finish_time):  #num_request is the number of assigned requests in the set,       estimated_accuracy is the accuracy of the ---> initialized []
+        self.id = id
         self.arrival_time = arrival_time
         self.num_completed_request = num_completed_request  #Initially zero
         self.estimated_accuracy = estimated_accuracy
@@ -170,7 +171,7 @@ class DecisionMaker_local:
                                     completed_requests.append((r_set.arrival_time, start, finish))
                                     response_time = finish - r_set.arrival_time
                                     response_logs.append({
-                                        "request_set_id": request_sets.index(r_set),
+                                        "request_set_id": r_set.id,
                                         "arrival_time": r_set.arrival_time,
                                         "start_time": start,
                                         "finish_time": finish,
@@ -306,7 +307,7 @@ class DecisionMaker_hungarian:
                 completed_requests.append((req_set.arrival_time, start, finish))
                 response_time = finish - req_set.arrival_time
                 response_logs.append({
-                    "request_set_id": request_sets.index(req_set),
+                    "request_set_id": request_sets.id,
                     "arrival_time": req_set.arrival_time,
                     "start_time": start,
                     "finish_time": finish,
@@ -421,7 +422,7 @@ class DecisionMaker_local_priority:
                             completed_requests.append((r_set.arrival_time, start, finish))
                             response_time = finish - r_set.arrival_time
                             response_logs.append({
-                                "request_set_id": request_sets.index(r_set),
+                                "request_set_id": r_set.id,
                                 "arrival_time": r_set.arrival_time,
                                 "start_time": start,
                                 "finish_time": finish,
@@ -707,24 +708,25 @@ def main():
     arrivals = set()
     base_requests = []
 
+
     with open("time_stamps_alibaba.csv", newline='') as file:
         alibaba_traces = csv.reader(file)
-    
-        for row in islice(alibaba_traces, 0, 5000, 20):
+
+        for idx, row in enumerate(islice(alibaba_traces, 0, 5000, 20)):
             try:
                 row = [int(item.strip()) for item in row]
             except ValueError:
                 continue
-    
+
             if row[0] in arrivals:
                 continue
-    
+
             arrivals.add(row[0])
             required_accuracy = round(random.uniform(MIN_REQUIRED_ACCURACY, MAX_REQUIRED_ACCURACY), 2)
             qos_response_time = row[0] + round(random.uniform(MIN_RESPONSE_TIME, MAX_RESPONSE_TIME), 2)
-            base_requests.append(Request_set(row[0], required_accuracy, qos_response_time, 0, [], 0))
 
-
+            # Include the unique ID (idx)
+            base_requests.append(Request_set(idx, row[0], required_accuracy, qos_response_time, 0, [], 0))
 
     #arrival_fn = lambda: random.uniform(1.0, 1.5) # requests' arrival rate
 
@@ -761,13 +763,13 @@ def main():
     sim1.run()
     approach = "Greedy"
     sim1.print_stats(approach)
-
+    sim1.save_response_logs(approach)
     sim2 = Simulator(edge_nodes=build_nodes(edge_num), models=models, duration=60, decision_maker = DecisionMaker_local_priority())
     sim2.request_sets = copy.deepcopy(base_requests)
     sim2.run()
     approach = "Priority"
     sim2.print_stats(approach)
-
+    sim2.save_response_logs(approach)
     sim3 = Simulator(edge_nodes=build_nodes(edge_num), models=models, duration=60,
                      decision_maker=DecisionMaker_hungarian())
     sim3.request_sets = copy.deepcopy(base_requests)
