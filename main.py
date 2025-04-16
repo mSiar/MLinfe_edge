@@ -164,7 +164,9 @@ class DecisionMaker_local:
                         for replica in edge_nodes[ctn["edge_id"]].replicas:
                             for req in range(NUM_REQUEST-r_set.num_completed_request):
                                 start, finish, accuracy = replica.process_request(r_set.arrival_time)
-                                if finish <= r_set.qos_response_time and accuracy+sum(r_set.estimated_accuracy)>=r_set.required_accuracy*(r_set.num_completed_request+1):
+
+
+                                if finish <= r_set.qos_response_time + r_set.arrival_time and accuracy+sum(r_set.estimated_accuracy)>=r_set.required_accuracy*(r_set.num_completed_request+1):
                                     completed_requests.append((r_set.arrival_time, start, finish))
                                     r_set.estimated_accuracy.append(accuracy)
                                     r_set.finish_time = max(r_set.finish_time, finish)
@@ -351,7 +353,7 @@ class DecisionMaker_local_priority:
                         "current_replicas": len(node.replicas)
                     })
 
-        replicas_list.sort(key=lambda r: r["energy"])
+        replicas_list.sort(key=lambda r: r["energy"] / r["accuracy"])
 
         for ctn in replicas_list:
             matching_requests = [
@@ -517,7 +519,8 @@ class Simulator:
         self.completed_requests = []
         self.decision_maker = decision_maker
         self.decision_times = []
-
+        ### capture the decision
+        self.response_times = []
 
 
     def run(self):
