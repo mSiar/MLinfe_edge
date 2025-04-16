@@ -117,7 +117,7 @@ class DecisionMaker_local:
     def __init__(self):
         pass
     
-    def decide_allocation(self, request_sets, edge_nodes, models, completed_requests):
+    def decide_allocation(self, request_sets, edge_nodes, models, completed_requests, response_logs):
         replicas_list = []
         total_model_flops = sum(m.required_flops for m in models)
         
@@ -168,6 +168,16 @@ class DecisionMaker_local:
 
                                 if finish <= r_set.qos_response_time + r_set.arrival_time and accuracy+sum(r_set.estimated_accuracy)>=r_set.required_accuracy*(r_set.num_completed_request+1):
                                     completed_requests.append((r_set.arrival_time, start, finish))
+                                    response_time = finish - r_set.arrival_time
+                                    response_logs.append({
+                                        "request_set_id": request_sets.index(r_set),
+                                        "arrival_time": r_set.arrival_time,
+                                        "start_time": start,
+                                        "finish_time": finish,
+                                        "response_time": response_time,
+                                        "model": replica.model.name,
+                                        "edge_node_id": replica.edge_node.id
+                                    })
                                     r_set.estimated_accuracy.append(accuracy)
                                     r_set.finish_time = max(r_set.finish_time, finish)
                                     r_set.num_completed_request +=1
@@ -234,7 +244,7 @@ class DecisionMaker_hungarian:
 
         return [(row_indices[r], col_indices[c]) for r, c in zip(reduced_row_ind, reduced_col_ind)]
 
-    def decide_allocation(self, request_sets, edge_nodes, models, completed_requests):
+    def decide_allocation(self, request_sets, edge_nodes, models, completed_requests, response_logs):
         replicas_list = []
         total_model_flops = sum(m.required_flops for m in models)
 
@@ -294,6 +304,16 @@ class DecisionMaker_hungarian:
             if finish <= req_set.qos_response_time + 1.0 and \
                     accuracy + sum(req_set.estimated_accuracy) >= req_set.required_accuracy * (req_set.num_completed_request + 1):
                 completed_requests.append((req_set.arrival_time, start, finish))
+                response_time = finish - req_set.arrival_time
+                response_logs.append({
+                    "request_set_id": request_sets.index(req_set),
+                    "arrival_time": req_set.arrival_time,
+                    "start_time": start,
+                    "finish_time": finish,
+                    "response_time": response_time,
+                    "model": replica.model.name,
+                    "edge_node_id": replica.edge_node.id
+                })
                 req_set.estimated_accuracy.append(accuracy)
                 req_set.finish_time = max(req_set.finish_time, finish)
                 req_set.num_completed_request += 1
@@ -331,7 +351,7 @@ class DecisionMaker_local_priority:
     def __init__(self):
         pass
 
-    def decide_allocation(self, request_sets, edge_nodes, models, completed_requests):
+    def decide_allocation(self, request_sets, edge_nodes, models, completed_requests, response_logs):
         replicas_list = []
         total_model_flops = sum(m.required_flops for m in models)
 
@@ -399,6 +419,16 @@ class DecisionMaker_local_priority:
                         if finish <= r_set.qos_response_time + r_set.arrival_time and \
                                 accuracy + sum(r_set.estimated_accuracy) >= r_set.required_accuracy * (r_set.num_completed_request + 1):
                             completed_requests.append((r_set.arrival_time, start, finish))
+                            response_time = finish - r_set.arrival_time
+                            response_logs.append({
+                                "request_set_id": request_sets.index(r_set),
+                                "arrival_time": r_set.arrival_time,
+                                "start_time": start,
+                                "finish_time": finish,
+                                "response_time": response_time,
+                                "model": replica.model.name,
+                                "edge_node_id": replica.edge_node.id
+                            })
                             r_set.estimated_accuracy.append(accuracy)
                             r_set.finish_time = max(r_set.finish_time, finish)
                             r_set.num_completed_request += 1
@@ -444,7 +474,7 @@ class DecisionMaker_random:
     def __init__(self):
         pass
     
-    def decide_allocation(self, request_sets, edge_nodes, models, completed_requests):
+    def decide_allocation(self, request_sets, edge_nodes, models, completed_requests, response_logs):
         replicas_list = []
         max_attempts = sum(NUM_REQUEST-r.num_completed_request for r in request_sets)
         total_model_flops = sum(m.required_flops for m in models)
@@ -520,7 +550,7 @@ class Simulator:
         self.decision_maker = decision_maker
         self.decision_times = []
         ### capture the decision
-        self.response_times = []
+        self.response_logs = []
 
 
     def run(self):
@@ -534,7 +564,7 @@ class Simulator:
 
             	#measure start time
             	start_decision = time.time()
-            	self.decision_maker.decide_allocation(current_requests, self.edge_nodes, self.models, self.completed_requests)
+            	self.decision_maker.decide_allocation(current_requests, self.edge_nodes, self.models, self.completed_requests, self.response_logs)
 
             	#end time
             	end_decision = time.time()
@@ -594,7 +624,7 @@ class Simulator:
         
             
 
-    def print_stats(self, apprach):
+    def print_stats(self, approach):
         total = NUM_REQUEST*len(self.request_sets)
         print("first request set:  ", self.request_sets[0])
         completed = sum([req.num_completed_request for req in self.request_sets])
@@ -632,8 +662,23 @@ class Simulator:
             perc_90_decision = np.percentile(self.decision_times, 90)
             print(f"Average Decision Time per Slot: {avg_decision_time:.4f} seconds")
             print(f"90th Percentile Decision Time: {perc_90_decision:.4f} seconds")
-        self.plot_metrics(delays, diff_time, diff_avg_acc, apprach)
+        self.plot_metrics(delays, diff_time, diff_avg_acc, approach)
 
+    def save_response_logs(self, approach):
+        filename=f"{approach}_response_logs.csv"
+        if not self.response_logs:
+            print("No response logs to save.")
+            return
+
+        with open(filename, mode='w', newline='') as csvfile:
+            fieldnames = ["request_set_id", "arrival_time", "start_time", "finish_time", "response_time", "model",
+                          "edge_node_id"]
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            for entry in self.response_logs:
+                writer.writerow(entry)
+
+        print(f"Saved response logs to {filename}")
 
 def main():
 
@@ -729,6 +774,7 @@ def main():
     sim3.run()
     approach = "hungarian"
     sim3.print_stats(approach)
+    sim3.save_response_logs(approach)
 
     #sim3 = Simulator(edge_nodes=build_nodes(edge_num), models=models, duration=60, decision_maker = DecisionMaker_random())
     #sim3.request_sets = copy.deepcopy(base_requests)
