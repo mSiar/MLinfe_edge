@@ -1,7 +1,7 @@
+
 import random
 import this
 import time
-
 import numpy as np
 import pandas as pd
 import math
@@ -17,7 +17,7 @@ class MLModel:
     def __init__(self, name, required_flops, accuracy):
         self.name = name
         self.required_flops = required_flops
-        self.accuracy = accuracy #this not dependent on allocated FLOPs, hence static
+        self.accuracy = accuracy #this is not dependent on allocated FLOPs, hence static
 
 
 class Replica:
@@ -126,16 +126,16 @@ class DecisionMaker_local:
             for model in models:
                 model_weight = model.required_flops / total_model_flops
                 flops = model_weight * node.total_flops_capacity* UTILIZATION_THRESHOLD #CHECK: UTILIZATION_THRESHOLD ?
-                energy = flops * node.flops_watt
-
-                replicas_list.append({"edge_id": node.id,       #List of all potential containers CTN_j,l the system
-                                      "model": model,
-                                      "accuracy": model.accuracy,
-                                      "service_time": model.required_flops/flops,
-                                      "replica_flops":flops,
-                                      "energy": energy,
-                                      "current_replicas": len(node.replicas)
-                                     })
+                energy = flops / node.flops_watt
+                if node.can_allocate(flops) and node.available_energy >= energy:
+                    replicas_list.append({"edge_id": node.id,       #List of all potential containers CTN_j,l the system
+                                          "model": model,
+                                          "accuracy": model.accuracy,
+                                          "service_time": model.required_flops/flops,
+                                          "replica_flops":flops,
+                                          "energy": energy,
+                                          "current_replicas": len(node.replicas)
+                                         })
         replicas_list.sort(key=lambda r:r["energy"])
 
 
@@ -205,7 +205,7 @@ class DecisionMaker_hungarian:
         urgency_penalty = 1.0 / slack  # higher when tight deadline
 
         # ---- Energy + node utilization penalty ----
-        energy = replica.allocated_flops * replica.edge_node.flops_watt
+        energy = replica.allocated_flops / replica.edge_node.flops_watt
         utilization_ratio = replica.edge_node.used_flops() / replica.edge_node.total_flops_capacity
         load_penalty = 2.0 * utilization_ratio  # Weight can be tuned
 
@@ -253,15 +253,16 @@ class DecisionMaker_hungarian:
             for model in models:
                 model_weight = model.required_flops / total_model_flops
                 flops = model_weight * node.total_flops_capacity * UTILIZATION_THRESHOLD
-                energy = flops * node.flops_watt
-                replicas_list.append({
-                    "edge_id": node.id,
-                    "model": model,
-                    "accuracy": model.accuracy,
-                    "service_time": model.required_flops / flops,
-                    "replica_flops": flops,
-                    "energy": energy,
-                })
+                energy = flops / node.flops_watt
+                if node.can_allocate(flops) and node.available_energy >= energy:
+                    replicas_list.append({
+                        "edge_id": node.id,
+                        "model": model,
+                        "accuracy": model.accuracy,
+                        "service_time": model.required_flops / flops,
+                        "replica_flops": flops,
+                        "energy": energy,
+                    })
 
         #replicas_list.sort(key=lambda r: r["energy"] / r["accuracy"])
         replicas_list.sort(
@@ -285,7 +286,7 @@ class DecisionMaker_hungarian:
             inter_arrival_times = [arrivals[i] - arrivals[i - 1] for i in range(1, len(arrivals))] if len(arrivals) > 1 else [1.0]
             dominated_request = max(matching_requests, key=lambda r: (NUM_REQUEST - r.num_completed_request) / r.qos_response_time)
 
-            num_replica = self.decide_provisioning(dominated_request, inter_arrival_times, ctn, edge_nodes)
+            num_replica = decide_provisioning(dominated_request, inter_arrival_times, ctn, edge_nodes)
             for _ in range(num_replica):
                 edge.add_replica(ctn["model"])
 
@@ -319,34 +320,6 @@ class DecisionMaker_hungarian:
                 req_set.finish_time = max(req_set.finish_time, finish)
                 req_set.num_completed_request += 1
 
-    def decide_provisioning(self, dominated_request, inter_arrival_times, ctn, edge_nodes):
-        edge = edge_nodes[ctn["edge_id"]]
-        max_replicas = min(
-            math.floor((edge.total_flops_capacity - edge.used_flops()) / ctn["replica_flops"]),
-            math.floor((edge.total_energy_limit - edge.used_energy()) / ctn["energy"])
-        )
-
-        service_time = ctn["service_time"]
-        lambda_rate = 1 / np.mean(inter_arrival_times)
-        mu = 1 / service_time
-        var_inter = np.var(inter_arrival_times) if len(inter_arrival_times) > 1 else 0
-        ca2 = var_inter / np.mean(inter_arrival_times)
-        cs2 = mu
-
-        for num_replica in range(1, max_replicas + 1):
-            rho = lambda_rate / (num_replica * mu)
-            if rho >= 1:
-                continue
-            wq = ((ca2 ** 2 + cs2 ** 2) / 2) * (rho ** (np.sqrt(2 * (num_replica + 1)) - 1)) / (num_replica * (1 - rho)) / mu
-            wait_time = wq + 1 / mu
-            print(f'wait time {wait_time}')
-            req = min(math.floor((wait_time + ctn["service_time"]) / num_replica),
-                      NUM_REQUEST - dominated_request.num_completed_request)
-            if wait_time + ctn["service_time"] <= dominated_request.qos_response_time + 1.0 and req >= 1 and \
-                    lambda_rate / ((num_replica + 1) * mu) <= UTILIZATION_THRESHOLD:
-                return num_replica
-        return 0
-
 
 class DecisionMaker_local_priority:
     def __init__(self):
@@ -360,7 +333,7 @@ class DecisionMaker_local_priority:
             for model in models:
                 model_weight = model.required_flops / total_model_flops
                 flops = model_weight * node.total_flops_capacity * UTILIZATION_THRESHOLD
-                energy = flops * node.flops_watt
+                energy = flops / node.flops_watt
 
                 #Only proceed if node can allocate and has enough energy
                 if node.can_allocate(flops) and node.available_energy >= energy:
@@ -374,7 +347,7 @@ class DecisionMaker_local_priority:
                         "current_replicas": len(node.replicas)
                     })
 
-        replicas_list.sort(key=lambda r: r["energy"] / r["accuracy"])
+        replicas_list.sort(key=lambda r: (r["service_time"], -r["accuracy"], r["energy"]))
 
         for ctn in replicas_list:
             matching_requests = [
@@ -405,7 +378,7 @@ class DecisionMaker_local_priority:
 
             inter_arrival_times = [arrivals[i] - arrivals[i - 1] for i in range(1, len(arrivals))] if len(arrivals) > 1 else [1.0]
 
-            num_replica = self.decide_provisioning(dominated_request, inter_arrival_times, ctn, edge_nodes)
+            num_replica = decide_provisioning(dominated_request, inter_arrival_times, ctn, edge_nodes)
             if num_replica <= 0:
                 continue
 
@@ -437,40 +410,6 @@ class DecisionMaker_local_priority:
                         #if served >= 3:  # Cap: only serve 3 subrequests per replica/request
                         #    break
 
-    def decide_provisioning(self, dominated_request, inter_arrival_times, ctn, edge_nodes):
-        edge = edge_nodes[ctn["edge_id"]]
-        max_replicas = min(
-            math.floor((edge.total_flops_capacity - edge.used_flops()) / ctn["replica_flops"]),
-            math.floor((edge.total_energy_limit - edge.used_energy()) / ctn["energy"])
-        )
-
-        service_time = ctn["service_time"]
-        lambda_rate = 1 / np.mean(inter_arrival_times)
-        mu = 1 / service_time
-        var_inter = np.var(inter_arrival_times) if len(inter_arrival_times) > 1 else 0
-        ca2 = var_inter / np.mean(inter_arrival_times)
-        cs2 = mu
-        num_replica = sum(1 for rep in edge_nodes[ctn["edge_id"]].replicas if rep.model.name == ctn["model"].name)
-        for num_replica in range(1, max_replicas + 1):
-            rho = lambda_rate / (num_replica * mu)
-            if rho >= 1:
-                continue
-            #print(f"lambda={lambda_rate}, mu={mu}, rho={rho}")
-
-            wq = ((ca2 ** 2 + cs2 ** 2) / 2) * (rho ** (np.sqrt(2 * (num_replica + 1)) - 1)) / (num_replica * (1 - rho)) / mu
-            wait_time = wq + 1 / mu
-            #print(f"wait_time={wait_time}, service_time={ctn['service_time']}, num_replica={num_replica}")
-
-            #print(f'num_replica={num_replica}')
-            req = min(math.floor((wait_time + ctn["service_time"]) / num_replica),
-                      NUM_REQUEST - dominated_request.num_completed_request)
-            #print(f"req={req}")
-            if wait_time + ctn["service_time"] <= dominated_request.qos_response_time + 1.0 and req >= 1 and \
-                    lambda_rate / ((num_replica + 1) * mu) <= UTILIZATION_THRESHOLD:
-                return num_replica
-
-        return num_replica
-
 class DecisionMaker_random:
     def __init__(self):
         pass
@@ -496,11 +435,21 @@ class DecisionMaker_random:
                 attempts += 1
                 continue
 
-            start_time, finish_time, acc = replica.process_request(req.arrival_time)
-            if finish_time <= req.qos_response_time and acc + sum(req.estimated_accuracy) >= req.required_accuracy * (req.num_completed_request + 1):
-                completed_requests.append((req.arrival_time, start_time, finish_time))
+            start, finish, acc = replica.process_request(req.arrival_time)
+            if finish <= req.qos_response_time and acc + sum(req.estimated_accuracy) >= req.required_accuracy * (req.num_completed_request + 1):
+                completed_requests.append((req.arrival_time, start, finish))
+                response_time = finish - req.arrival_time
+                response_logs.append({
+                    "request_set_id": req.id,
+                    "arrival_time": req.arrival_time,
+                    "start_time": start,
+                    "finish_time": finish,
+                    "response_time": response_time,
+                    "model": replica.model.name,
+                    "edge_node_id": replica.edge_node.id
+                })
                 req.estimated_accuracy.append(acc)
-                req.finish_time = max(req.finish_time, finish_time)
+                req.finish_time = max(req.finish_time, finish)
                 req.num_completed_request += 1
 
             attempts += 1
@@ -509,15 +458,14 @@ class DecisionMaker_random:
 
 def decide_provisioning(dominated_request, inter_arrival_times, ctn, edge_nodes):
         
-        max_replicas = min(math.floor((edge_nodes[ctn["edge_id"]].total_flops_capacity-edge_nodes[ctn["edge_id"]].used_flops())/ctn["replica_flops"]), math.floor((edge_nodes[ctn["edge_id"]].total_energy_limit - edge_nodes[ctn["edge_id"]].used_energy())/ctn["energy"])) #maximum number of acceptable replicas
+        edge = edge_nodes[ctn["edge_id"]]
+        max_replicas = min(math.floor((edge.total_flops_capacity-edge.used_flops())/ctn["replica_flops"]), 
+                           math.floor((edge.total_energy_limit - edge.used_energy())/ctn["energy"])) #maximum number of acceptable replicas
         
         service_time = ctn["service_time"]
         lambda_rate = 1 / np.mean(inter_arrival_times)
         mu = 1 / service_time
-        if len(inter_arrival_times)>1:
-            var_inter = np.var(inter_arrival_times)
-        else:
-            var_inter =0 
+        var_inter = np.var(inter_arrival_times) if len(inter_arrival_times) > 1 else 0
         ca2 = var_inter / (np.mean(inter_arrival_times))
         cs2 = mu
         
@@ -531,14 +479,14 @@ def decide_provisioning(dominated_request, inter_arrival_times, ctn, edge_nodes)
                 continue
             wq = ((ca2**2 + cs2**2) / 2) * (rho ** (np.sqrt(2 * (num_replica + 1)) - 1)) / (num_replica * (1 - rho)) / mu 
             wait_time = wq + 1 / mu
-            req = min(math.floor((wait_time+ctn["service_time"])/num_replica), NUM_REQUEST-dominated_request.num_completed_request)
+            req = min(num_replica, NUM_REQUEST-dominated_request.num_completed_request)
             
-            if(wait_time+ctn["service_time"]<=dominated_request.qos_response_time and num_replica <=max_replicas and req+dominated_request.num_completed_request==NUM_REQUEST and lambda_rate/((num_replica+1)*mu)<=UTILIZATION_THRESHOLD): 
+            if(wait_time+ctn["service_time"]<=dominated_request.qos_response_time and req+dominated_request.num_completed_request==NUM_REQUEST and lambda_rate/((num_replica+1)*mu)<=UTILIZATION_THRESHOLD): 
                 return num_replica
     
         return num_replica
+  
 
-    
 class Simulator:
     def __init__(self, edge_nodes, models, duration, decision_maker):
         self.edge_nodes = edge_nodes
@@ -625,7 +573,8 @@ class Simulator:
         
             
 
-    def print_stats(self, approach):
+    def print_stats(self, approach, edge_num, arrival, energy_interval, log):
+        print(f"---------------------------  Approach:  {approach}  ---------------------------------")
         total = NUM_REQUEST*len(self.request_sets)
         print("first request set:  ", self.request_sets[0])
         completed = sum([req.num_completed_request for req in self.request_sets])
@@ -633,7 +582,7 @@ class Simulator:
         delays =  [finish - arrival for arrival, _, finish in self.completed_requests]
         diff_time = [(req.qos_response_time - req.finish_time) for req in self.request_sets]
         diff_avg_acc = [(sum(req.estimated_accuracy)/req.num_completed_request)- req.required_accuracy for req in self.request_sets if req.num_completed_request>0]
-        total_diff_time = sum([(req.qos_response_time - req.finish_time) for req in self.request_sets])
+        total_diff_time = sum([(req.qos_response_time - req.finish_time) for req in self.request_sets  if req.num_completed_request>0])
         total_diff_avg_acc = sum([(sum(req.estimated_accuracy)/req.num_completed_request)- req.required_accuracy for req in self.request_sets if req.num_completed_request>0])
 
         print(f"Total Requests: {total}")
@@ -653,17 +602,37 @@ class Simulator:
         total_energy_used = sum(node.used_energy() for node in self.edge_nodes)
         print(f"Total Energy Consumed: {total_energy_used:.2f}")
 
+        total_util = 0
         for node in self.edge_nodes:
             used_flops = node.used_flops()
             flops_util = used_flops / (UTILIZATION_THRESHOLD * node.total_flops_capacity)
             print(f"Node {node.id} FLOPs Utilization: {flops_util:.2%}")
+            total_util += flops_util
+        total_util/=len(self.edge_nodes)
 
         if hasattr(self, 'decision_times'):
             avg_decision_time = sum(self.decision_times) / len(self.decision_times)
             perc_90_decision = np.percentile(self.decision_times, 90)
             print(f"Average Decision Time per Slot: {avg_decision_time:.4f} seconds")
             print(f"90th Percentile Decision Time: {perc_90_decision:.4f} seconds")
-        self.plot_metrics(delays, diff_time, diff_avg_acc, approach)
+
+        if energy_interval is None:
+            energy_interval= [10**4, 10**6] # Defaulf interval
+
+        log.append({
+                    "approach": approach,
+                    "edge_num": edge_num, 
+                    "Arrival_rate": arrival,
+                    "Energy_interval": energy_interval,
+                    "total_request": total,
+                    "Completed_requests": completed,
+                    "Rejected_requests": rejected,
+                    "Speed:Deadline-Finish": total_diff_time,
+                    "Acc:AvgAcc-ExpAcc": total_diff_avg_acc,
+                    "Total_energy_used": total_energy_used,
+                    "Total_utilisation": total_util 
+                })    
+        # self.plot_metrics(delays, diff_time, diff_avg_acc, approach)
 
     def save_response_logs(self, approach):
         filename=f"{approach}_response_logs.csv"
@@ -680,8 +649,14 @@ class Simulator:
                 writer.writerow(entry)
 
         print(f"Saved response logs to {filename}")
+    
 
 def main():
+    
+    DEFAULT_EDGE_NUM = 3
+    DEFAULT_ENERGY_INTERVAL = [10**4, 10**6]
+    DEFAULT_ARRIVAL = 20
+    NUM_REQUEST = 10
 
     random.seed(42)
     np.random.seed(42)
@@ -694,95 +669,163 @@ def main():
         MLModel(name="yolov5x", required_flops=246.4, accuracy= 0.95)
     ]
 
-    def build_nodes(edge_num):
-        return [
-            EdgeNode(id=i,
-                     flops_capacity=FLOPS[i],
-                     flops_watt=FLOPS_WATT[i],
-                     energy_limit=random.randint(10**4, 10**6),
-                     models=models)
-            for i in range(edge_num)
-        ]
+    def build_nodes(edge_num, interval):
+        if interval is None:
+            return [
+                EdgeNode(id=i,
+                         flops_capacity=FLOPS[i],
+                         flops_watt=FLOPS_WATT[i],
+                         energy_limit=random.randint(DEFAULT_ENERGY_INTERVAL[0], DEFAULT_ENERGY_INTERVAL[1]),
+                         models=models)
+                for i in range(edge_num)
+            ]
+        else:
+            return [
+                EdgeNode(id=i,
+                         flops_capacity=FLOPS[i],
+                         flops_watt=FLOPS_WATT[i],
+                         energy_limit=random.randint(interval[0], interval[1]),
+                         models=models)
+                for i in range(edge_num)
+            ]
 
-    edge_num = 5
-    arrivals = set()
-    base_requests = []
 
-
-    with open("time_stamps_alibaba.csv", newline='') as file:
-        alibaba_traces = csv.reader(file)
-
-        for idx, row in enumerate(islice(alibaba_traces, 0, 5000, 20)):
-            try:
-                row = [int(item.strip()) for item in row]
-            except ValueError:
-                continue
-
-            if row[0] in arrivals:
-                continue
-
-            arrivals.add(row[0])
-            required_accuracy = round(random.uniform(MIN_REQUIRED_ACCURACY, MAX_REQUIRED_ACCURACY), 2)
-            qos_response_time = row[0] + round(random.uniform(MIN_RESPONSE_TIME, MAX_RESPONSE_TIME), 2)
-
-            # Include the unique ID (idx)
-            base_requests.append(Request_set(idx, row[0], required_accuracy, qos_response_time, 0, [], 0))
-
-    #arrival_fn = lambda: random.uniform(1.0, 1.5) # requests' arrival rate
-
-    # file = open("time_stamps_alibaba.csv")
-    # alibaba_traces = csv.reader(file)
-
-    # base_requests = []
-    # arrivals = set()
-    # for row in alibaba_traces:
-    #     if all(item.isdigit() for item in row):
-    #         row = [int(item) for item in row]
-    #     else: 
-    #         continue
-            
-    #     if row[0] in arrivals:
-    #         continue
-    #     arrivals.add(row[0])
-    #     required_accuracy = round(random.uniform(MIN_REQUIRED_ACCURACY, MAX_REQUIRED_ACCURACY), 2)
-    #     qos_response_time = 1 + round(random.uniform(MIN_RESPONSE_TIME, MAX_RESPONSE_TIME), 2)
-    #     base_requests.append(Request_set(1, required_accuracy, qos_response_time, 0, [], 0))
+    def generate_requestSet(arrival):
+        arrivals = set()
+        base_requests = []
+        if arrival is None:
+            arrival = DEFAULT_ARRIVAL
+        
+        with open("time_stamps_alibaba.csv", newline='') as file:
+            alibaba_traces = csv.reader(file)
     
-   
-    # duration = 40
-    # current_time = 0
-    # while current_time < duration:
-    #     inter_arrival = arrival_fn()
-    #     current_time += inter_arrival
-    #     required_accuracy = round(random.uniform(MIN_REQUIRED_ACCURACY, MAX_REQUIRED_ACCURACY), 2)
-    #     qos_response_time = current_time + round(random.uniform(MIN_RESPONSE_TIME, MAX_RESPONSE_TIME), 2)
-    #     base_requests.append(Request_set(current_time, required_accuracy, qos_response_time, 0, [], 0))
+            for idx, row in enumerate(islice(alibaba_traces, 0, 5000, arrival)):
+                try:
+                    row = [int(item.strip()) for item in row]
+                except ValueError:
+                    continue
+    
+                if row[0] in arrivals:
+                    continue
+    
+                arrivals.add(row[0])
+                required_accuracy = round(random.uniform(MIN_REQUIRED_ACCURACY, MAX_REQUIRED_ACCURACY), 2)
+                qos_response_time = row[0] + round(random.uniform(MIN_RESPONSE_TIME, MAX_RESPONSE_TIME), 2)
+    
+                # Include the unique ID (idx)
+                base_requests.append(Request_set(idx, row[0], required_accuracy, qos_response_time, 0, [], 0))
+        return base_requests
+                
 
-    sim1 = Simulator(edge_nodes=build_nodes(edge_num), models=models, duration=60, decision_maker=DecisionMaker_local())
-    sim1.request_sets = copy.deepcopy(base_requests)
-    sim1.run()
-    approach = "Greedy"
-    sim1.print_stats(approach)
-    sim1.save_response_logs(approach)
-    sim2 = Simulator(edge_nodes=build_nodes(edge_num), models=models, duration=60, decision_maker = DecisionMaker_local_priority())
-    sim2.request_sets = copy.deepcopy(base_requests)
-    sim2.run()
-    approach = "Priority"
-    sim2.print_stats(approach)
-    sim2.save_response_logs(approach)
-    sim3 = Simulator(edge_nodes=build_nodes(edge_num), models=models, duration=60,
-                     decision_maker=DecisionMaker_hungarian())
-    sim3.request_sets = copy.deepcopy(base_requests)
-    sim3.run()
-    approach = "hungarian"
-    sim3.print_stats(approach)
-    sim3.save_response_logs(approach)
+    base_requests = generate_requestSet(None)
+    log_diffEdge = []
 
-    #sim3 = Simulator(edge_nodes=build_nodes(edge_num), models=models, duration=60, decision_maker = DecisionMaker_random())
-    #sim3.request_sets = copy.deepcopy(base_requests)
-    #sim3.run()
-    #approach = "Random"
-    #sim3.print_stats(approach)
+    for edge_num in range(2,11):
+        sim1 = Simulator(edge_nodes=build_nodes(edge_num, None), models=models, duration=60, decision_maker=DecisionMaker_local())
+        sim1.request_sets = copy.deepcopy(base_requests)
+        sim1.run()
+        approach = "Greedy"
+        sim1.print_stats(approach, edge_num, 20, None, log_diffEdge)
+        sim1.save_response_logs(approach)
+        
+        sim2 = Simulator(edge_nodes=build_nodes(edge_num, None), models=models, duration=60, decision_maker = DecisionMaker_local_priority())
+        sim2.request_sets = copy.deepcopy(base_requests)
+        sim2.run()
+        approach = "Priority"
+        sim2.print_stats(approach, edge_num, 20, None, log_diffEdge)
+        sim2.save_response_logs(approach)
+                
+        sim3 = Simulator(edge_nodes=build_nodes(edge_num, None), models=models, duration=60, decision_maker=DecisionMaker_hungarian())
+        sim3.request_sets = copy.deepcopy(base_requests)
+        sim3.run()
+        approach = "hungarian"
+        sim3.print_stats(approach, edge_num, 20, None, log_diffEdge)
+        sim3.save_response_logs(approach)
+    
+        sim4 = Simulator(edge_nodes=build_nodes(edge_num, None), models=models, duration=60, decision_maker = DecisionMaker_random())
+        sim4.request_sets = copy.deepcopy(base_requests)
+        sim4.run()
+        approach = "Random"
+        sim4.print_stats(approach, edge_num, 20, None, log_diffEdge)
+
+    pd.DataFrame(log_diffEdge).to_csv("log_diffEdge.csv", index=False)
+
+    edge_num = DEFAULT_EDGE_NUM  # Number of edge servers by default
+    log_diffEnergy = []
+    energy_intervals = [
+        (10**1,10**2),
+        (10**2,10**3),
+        (10**3, 10**4),
+        (10**4, 10**5),
+        (10**5, 10**6)
+    ]
+    for intrv in energy_intervals:
+        sim1 = Simulator(edge_nodes=build_nodes(edge_num, intrv), models=models, duration=60, decision_maker=DecisionMaker_local())
+        sim1.request_sets = copy.deepcopy(base_requests)
+        sim1.run()
+        approach = "Greedy"
+        sim1.print_stats(approach, edge_num, 20, intrv, log_diffEnergy)
+        sim1.save_response_logs(approach)
+        
+        sim2 = Simulator(edge_nodes=build_nodes(edge_num, intrv), models=models, duration=60, decision_maker = DecisionMaker_local_priority())
+        sim2.request_sets = copy.deepcopy(base_requests)
+        sim2.run()
+        approach = "Priority"
+        sim2.print_stats(approach, edge_num, 20, intrv, log_diffEnergy)
+        sim2.save_response_logs(approach)
+                
+        sim3 = Simulator(edge_nodes=build_nodes(edge_num, intrv), models=models, duration=60, decision_maker=DecisionMaker_hungarian())
+        sim3.request_sets = copy.deepcopy(base_requests)
+        sim3.run()
+        approach = "hungarian"
+        sim3.print_stats(approach, edge_num, 20, intrv, log_diffEnergy)
+        sim3.save_response_logs(approach)
+    
+        sim4 = Simulator(edge_nodes=build_nodes(edge_num, intrv), models=models, duration=60, decision_maker = DecisionMaker_random())
+        sim4.request_sets = copy.deepcopy(base_requests)
+        sim4.run()
+        approach = "Random"
+        sim4.print_stats(approach, edge_num, 20, intrv, log_diffEnergy)
+        
+
+    pd.DataFrame(log_diffEnergy).to_csv("log_diffEnergy.csv", index=False)
+    
+    log_diffArrv = []
+
+    diff_arrivals = [5,10,20,30,40,50]
+    for arrv in diff_arrivals:
+        base_requests = generate_requestSet(arrv)
+        sim1 = Simulator(edge_nodes=build_nodes(edge_num, None), models=models, duration=60, decision_maker=DecisionMaker_local())
+        sim1.request_sets = copy.deepcopy(base_requests)
+        sim1.run()
+        approach = "Greedy"
+        sim1.print_stats(approach, edge_num, arrv, None, log_diffArrv)
+        sim1.save_response_logs(approach)
+        
+        sim2 = Simulator(edge_nodes=build_nodes(edge_num, None), models=models, duration=60, decision_maker = DecisionMaker_local_priority())
+        sim2.request_sets = copy.deepcopy(base_requests)
+        sim2.run()
+        approach = "Priority"
+        sim2.print_stats(approach, edge_num, arrv, None, log_diffArrv)
+        sim2.save_response_logs(approach)
+                
+        sim3 = Simulator(edge_nodes=build_nodes(edge_num, None), models=models, duration=60, decision_maker=DecisionMaker_hungarian())
+        sim3.request_sets = copy.deepcopy(base_requests)
+        sim3.run()
+        approach = "Hungarian"
+        sim3.print_stats(approach, edge_num, arrv, None, log_diffArrv)
+        sim3.save_response_logs(approach)
+    
+        sim4 = Simulator(edge_nodes=build_nodes(edge_num, None), models=models, duration=60, decision_maker = DecisionMaker_random())
+        sim4.request_sets = copy.deepcopy(base_requests)
+        sim4.run()
+        approach = "Random"
+        sim4.print_stats(approach, edge_num, arrv, None, log_diffArrv)
+
+    pd.DataFrame(log_diffArrv).to_csv("log_diffArrv.csv", index=False)
+
+    
+    
 
 if __name__ == "__main__":
     main()
