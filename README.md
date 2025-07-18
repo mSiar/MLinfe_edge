@@ -19,4 +19,4 @@ python  main.py
 
 
 Output files:
-After running the simulator, the log results will be saved as .csv files in the output directory
+After running the simulator, the log results will be saved as .csv files
