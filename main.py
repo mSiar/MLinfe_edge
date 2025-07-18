@@ -16,7 +16,7 @@ class MLModel:
     def __init__(self, name, required_flops, accuracy):
         self.name = name
         self.required_flops = required_flops
-        self.accuracy = accuracy  #this is not dependent on allocated FLOPs, hence static
+        self.accuracy = accuracy 
 
 
 class Replica:
@@ -52,12 +52,9 @@ class EdgeNode:
         self.available_energy = energy_limit
         self.replicas = []
         self.models = models
-        self.total_util_track = []
 
     def can_allocate(self, flops_needed):
 
-        #total_allocated = sum(rep.allocated_flops for rep in self.replicas)
-        #return (total_allocated + flops_needed) <= 0.8 * self.flops_capacity
         return flops_needed <= self.available_flops
 
     def current_energy_usage(self):
@@ -99,7 +96,7 @@ class EdgeNode:
         self.replicas = active_replicas
 
 class Request_set:
-    def __init__(self, id, arrival_time, qos_accuracy, qos_response_time, num_completed_request, estimated_accuracy, finish_time, flag):  #num_request is the number of assigned requests in the set,       estimated_accuracy is the accuracy of the ---> initialized []
+    def __init__(self, id, arrival_time, qos_accuracy, qos_response_time, num_completed_request, estimated_accuracy, finish_time, flag):  
         self.id = id
         self.arrival_time = arrival_time
         self.num_completed_request = num_completed_request  #Initially zero
@@ -110,24 +107,22 @@ class Request_set:
         self.flag = False
 
 
-class DecisionMaker_energy_priority:
+class DecisionMaker_energy_aware:
     def __init__(self):
         pass
     
-    def decide_allocation(self, request_sets, edge_nodes, models, completed_requests, response_logs, response_logs2):
+    def decide_allocation(self, request_sets, edge_nodes, models, completed_requests, response_logs):
         replicas_list = []
         total_model_flops = sum(m.required_flops for m in models)
         flag = False
         cc = 0
-        # for node in edge_nodes:
-        #     print(f"IN BEGINING OF DECIDE ALLOCATION : node :{node.id}, used energy:  {node.used_energy()}")
         for node in edge_nodes:
             for model in models:
                 model_weight = model.required_flops / total_model_flops
                 flops = model_weight * node.total_flops_capacity * UTILIZATION_THRESHOLD
                 energy = model.required_flops / node.flops_watt
                 if node.can_allocate(flops) and node.available_energy >= energy:
-                    replicas_list.append({"edge_id": node.id,       #List of all potential containers CTN_j,l in the system
+                    replicas_list.append({"edge_id": node.id,      
                                           "model": model,
                                           "accuracy": model.accuracy,
                                           "service_time": model.required_flops/flops,
@@ -144,7 +139,7 @@ class DecisionMaker_energy_priority:
             if (NUM_REQUEST - r.num_completed_request) > 0 and
             round(sum(r.estimated_accuracy)+ctn["accuracy"], max(decimal_places(r.required_accuracy), decimal_places(ctn["accuracy"]))) >= round(r.required_accuracy*(r.num_completed_request+1), decimal_places(r.required_accuracy))] # request sets with some uncompleted requests
             if not matching_requests:
-                edge_nodes[ctn["edge_id"]].remove_idle_replicas(min(req.arrival_time for req in request_sets)- 1e-6 ) #just removing idle replicas from container
+                edge_nodes[ctn["edge_id"]].remove_idle_replicas(min(req.arrival_time for req in request_sets)- 1e-6 ) #remove_idle_replicas
                 continue
 
             matching_requests.sort(key=lambda r:r.arrival_time)
@@ -186,30 +181,14 @@ class DecisionMaker_energy_priority:
                                 r_set.finish_time = max(r_set.finish_time, finish)
                                 r_set.num_completed_request +=1
                                 cc+=1
-        track = []
-        energy_al = []
-        used_en = []
-        track_util = []
-        for node in edge_nodes:
-            used_flops = node.used_flops()
-            flops_util = used_flops / (UTILIZATION_THRESHOLD * node.total_flops_capacity)
-            node.total_util_track.append(flops_util)
-            track.append(node.available_flops)
-            energy_al.append(node.current_energy_usage())
-            used_en.append(node.used_energy())
-            track_util.append(flops_util)
-        response_logs2.append({"flops_availbale":  track,
-                              "current_energy_usage": sum(energy_al),
-                              "used_energy":  sum(used_en),
-                              "flops_utilisation": track_util})
                 
 
 
-class DecisionMaker_energy_request_priority:
+class DecisionMaker_deadline_energy_aware:
     def __init__(self):
         pass
 
-    def decide_allocation(self, request_sets, edge_nodes, models, completed_requests, response_logs, response_logs2):
+    def decide_allocation(self, request_sets, edge_nodes, models, completed_requests, response_logs):
         replicas_list = []
         total_model_flops = sum(m.required_flops for m in models)
         for node in edge_nodes:
@@ -251,7 +230,6 @@ class DecisionMaker_energy_request_priority:
                 reverse=True
             )
             dominated_request = matching_requests[0]
-            # dominated_request = max(matching_requests, key=lambda r: (NUM_REQUEST - r.num_completed_request) / r.qos_response_time)
             
             arrivals = sorted([r.arrival_time for r in matching_requests])
             if len(arrivals)>=2:
@@ -291,29 +269,13 @@ class DecisionMaker_energy_request_priority:
                             r_set.finish_time = max(r_set.finish_time, finish)
                             r_set.num_completed_request += 1
 
-        track = []
-        energy_al = []
-        used_en = []
-        track_util = []
-        for node in edge_nodes:
-            used_flops = node.used_flops()
-            flops_util = used_flops / (UTILIZATION_THRESHOLD * node.total_flops_capacity)
-            node.total_util_track.append(flops_util)
-            track.append(node.available_flops)
-            energy_al.append(node.current_energy_usage())
-            used_en.append(node.used_energy())
-            track_util.append(flops_util)
-        response_logs2.append({"flops_availbale":  track,
-                      "current_energy_usage": sum(energy_al),
-                      "used_energy":  sum(used_en),
-                      "flops_utilisation": track_util})
                                 
                 
-class DecisionMaker_edgeParams_request_priority:
+class DecisionMaker_multi_criteria:
     def __init__(self):
         pass
 
-    def decide_allocation(self, request_sets, edge_nodes, models, completed_requests, response_logs, response_logs2):
+    def decide_allocation(self, request_sets, edge_nodes, models, completed_requests, response_logs):
         replicas_list = []
         total_model_flops = sum(m.required_flops for m in models)
 
@@ -323,7 +285,6 @@ class DecisionMaker_edgeParams_request_priority:
                 model_weight = model.required_flops / total_model_flops
                 flops = model_weight * node.total_flops_capacity * UTILIZATION_THRESHOLD
                 energy = model.required_flops / node.flops_watt
-                # print(f"CHECKING EDGE {node.id}:  MODEL:  {model.name} service_time: {model.required_flops / flops},  model.required_flops:  {model.required_flops},  flops:{flops},  total_capacity:  {node.total_flops_capacity}")
 
                 #Only proceed if node can allocate and has enough energy
                 if node.can_allocate(flops) and node.available_energy >= energy:
@@ -337,11 +298,7 @@ class DecisionMaker_edgeParams_request_priority:
                         "current_replicas": len(node.replicas)
                     })
 
-        
-        # print("############      checking sorted edges:  ##################")
         replicas_list.sort(key=lambda r: (r["service_time"], r["energy"], -r["accuracy"]))
-        # for ctn in replicas_list:
-        #     print(f"SORTED EDGE {ctn['edge_id']}:  MODEL:  {ctn['model'].name} service_time: {ctn['service_time']},  energy:  {ctn['energy']},  accuracy:{ctn['accuracy']}")
         
         for ctn in replicas_list:
             matching_requests = [
@@ -365,7 +322,6 @@ class DecisionMaker_edgeParams_request_priority:
             )
 
             dominated_request = matching_requests[0]
-            # dominated_request = max(matching_requests, key=lambda r: (NUM_REQUEST - r.num_completed_request) / r.qos_response_time)
             arrivals = sorted([r.arrival_time for r in matching_requests])
             if len(arrivals)>=2:
                 inter_arrival_times = [arrivals[i] - arrivals[i - 1] for i in range(1, len(arrivals))]
@@ -402,24 +358,6 @@ class DecisionMaker_edgeParams_request_priority:
                             r_set.estimated_accuracy.append(accuracy)
                             r_set.finish_time = max(r_set.finish_time, finish)
                             r_set.num_completed_request += 1
-
-        track = [] 
-        energy_al = []
-        used_en = []
-        track_util = []
-        
-        for node in edge_nodes:
-            used_flops = node.used_flops()
-            flops_util = used_flops / (UTILIZATION_THRESHOLD * node.total_flops_capacity)
-            node.total_util_track.append(flops_util)
-            track.append(node.available_flops)
-            energy_al.append(node.current_energy_usage())
-            used_en.append(node.used_energy())
-            track_util.append(flops_util)
-        response_logs2.append({"flops_availbale":  track,
-                      "current_energy_usage": sum(energy_al),
-                      "used_energy":  sum(used_en),
-                      "flops_utilisation": track_util})
         
 
 
@@ -465,7 +403,6 @@ class Simulator:
         self.decision_maker = decision_maker
         self.decision_times = []
         self.response_logs = []
-        self.response_logs2 = []
 
 
     def run(self):
@@ -482,22 +419,22 @@ class Simulator:
                     st.arrival_time=start_sim_time+TIME_SLOT
                     st.flag = True  
                 start_decision = time.time()
-                self.decision_maker.decide_allocation(current_requests, self.edge_nodes, self.models, self.completed_requests, self.response_logs, self.response_logs2)
+                self.decision_maker.decide_allocation(current_requests, self.edge_nodes, self.models, self.completed_requests, self.response_logs)
                 end_decision = time.time()
-                decision_times.append((end_decision - start_decision))
+                decision_times.append(end_decision - start_decision)
 
             start_sim_time += TIME_SLOT
         self.decision_times = decision_times        
             
 
-    def print_stats(self, approach, edge_num, arrival_rate, energy_interval, log):
+    def print_stats(self, approach, edge_num, arrival_rate, log):
         print(f"---------------------------  Approach:  {approach}  ---------------------------------")
         total = NUM_REQUEST*len(self.request_sets)
         completed = sum([req.num_completed_request for req in self.request_sets])
         rejected = sum([NUM_REQUEST-req.num_completed_request for req in self.request_sets if req.flag==True])
         delays =  [finish - arrival for arrival, _, finish in self.completed_requests]
         diff_time = [(req.qos_response_time - req.finish_time) for req in self.request_sets]
-        diff_avg_acc = [(sum(req.estimated_accuracy)/req.num_completed_request)- req.required_accuracy for req in self.request_sets if req.num_completed_request>0] #TODO : /devide number
+        diff_avg_acc = [(sum(req.estimated_accuracy)/req.num_completed_request)- req.required_accuracy for req in self.request_sets if req.num_completed_request>0] 
         total_diff_time = sum([((req.arrival_time+req.qos_response_time) - req.finish_time) for req in self.request_sets  if req.num_completed_request>0])
         total_diff_avg_acc = sum([(sum(req.estimated_accuracy)/req.num_completed_request)- req.required_accuracy for req in self.request_sets if req.num_completed_request>0])
 
@@ -507,51 +444,30 @@ class Simulator:
         print(f"Difference between finish time of completed request and deadline, for all request sets:  ", total_diff_time)
         print(f"Difference between average accuracy of completed request and expected minimum accuracy, for request sets with completed requests:  ", total_diff_avg_acc)
 
-        if (completed) > 0:
-            avg_delay = sum(delays) / total
-            percentile_90 = np.percentile(delays, 90)
-            percentile_95 = np.percentile(delays, 95)
-            print(f"Average Total Time per Request: {avg_delay:.2f} seconds")
-            print(f"90th Percentile Response Time: {percentile_90:.2f} seconds")
-            print(f"95th Percentile Response Time: {percentile_95:.2f} seconds")
 
         total_energy_used = sum(node.used_energy() for node in self.edge_nodes)
         print(f"Total Energy Consumed: {total_energy_used:.2f}")
 
-        avg_total_util = 0
         for node in self.edge_nodes:
-            # print(f"TRACK OF NODES UTILIZATION for node: {node.id}:   {node.total_util_track}")
-            node_util=[]
-            node_util = np.mean(node.total_util_track)
             print(f"node: {node.id} used this much energy: {node.used_energy()}")
             print(f"node: {node.id} energy limit:  {node.total_energy_limit}")
-            print(f"Node {node.id} Avg FLOPs Utilization: {node_util}")
-            avg_total_util+=node_util
-        avg_total_util /=len(self.edge_nodes)
-        print("AVERAGE TOTAL UTILIZATION:  ", avg_total_util)
 
         if hasattr(self, 'decision_times'):
             avg_decision_time = sum(self.decision_times) / len(self.decision_times)
             perc_90_decision = np.percentile(self.decision_times, 90)
             print(f"Average Decision Time per Slot: {avg_decision_time:.4f} seconds")
-            print(f"90th Percentile Decision Time: {perc_90_decision:.4f} seconds")
 
         if log is not None:
-
-            if energy_interval is None:
-                energy_interval= [10**4, 10**6] # Defaulf interval
             log.append({
                         "approach": approach,
                         "edge_num": edge_num, 
                         "Arrival_rate": arrival_rate,
-                        "Energy_interval": energy_interval,
                         "total_request": total,
                         "Completed_requests": completed,
                         "Rejected_requests": rejected,
                         "Speed:Deadline-Finish": total_diff_time,
                         "Acc:AvgAcc-ExpAcc": total_diff_avg_acc,
                         "Total_energy_used": total_energy_used,
-                        "Total_utilisation": avg_total_util 
                     })    
 
     def save_response_logs(self, approach):
@@ -570,18 +486,6 @@ class Simulator:
 
         print(f"Saved response logs to {filename}")
 
-    def save_response_logs2(self, approach):
-        filename=f"{approach}_available_flops.csv"
-        if not self.response_logs:
-            print("No response logs to save.")
-            return
-    
-        with open(filename, mode='w', newline='') as csvfile:
-            fieldnames = ["flops_availbale", "current_energy_usage", "used_energy", "flops_utilisation"]
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            writer.writeheader()
-            for entry in self.response_logs2:
-                writer.writerow(entry)
     
 
 
@@ -593,7 +497,7 @@ def decimal_places(val):
 
 
     
-def main(Experiments):
+def main():
     
     DEFAULT_EDGE_NUM = 5
     DEFAULT_ARRIVAL = 5
@@ -603,7 +507,6 @@ def main(Experiments):
     np.random.seed(42)
 
     energy_scale = [random.randint(2,8) for i in range(DEFAULT_EDGE_NUM)]   
-    print("energy_scale:  ", energy_scale)
 
     models = [
         MLModel(name="yolov5n", required_flops=7.7, accuracy= 0.3),
@@ -674,133 +577,31 @@ def main(Experiments):
         return base_requests         
 
     base_requests = generate_requestSet(None)
-    if Experiments is False:
-        edge_num = DEFAULT_EDGE_NUM        
-        
-        sim1 = Simulator(edge_nodes=build_nodes(edge_num, None), models=models, duration=60, decision_maker= DecisionMaker_energy_priority())
-        sim1.request_sets = copy.deepcopy(base_requests)
-        sim1.run()
-        approach = "Energy-aware"
-        sim1.print_stats(approach, edge_num, DEFAULT_ARRIVAL, None, None)
-        sim1.save_response_logs(approach)
-        sim1.save_response_logs2(approach)
 
-        
-        sim2 = Simulator(edge_nodes=build_nodes(edge_num, None), models=models, duration=60, decision_maker = DecisionMaker_energy_request_priority())
-        sim2.request_sets = copy.deepcopy(base_requests)
-        sim2.run()
-        approach = "Deadline-energy-aware"
-        sim2.print_stats(approach, edge_num, DEFAULT_ARRIVAL, None, None)
-        sim2.save_response_logs(approach)
-        sim2.save_response_logs2(approach)
-
-        
-        sim3 = Simulator(edge_nodes=build_nodes(edge_num, None), models=models, duration=60, decision_maker = DecisionMaker_edgeParams_request_priority())
-        sim3.request_sets = copy.deepcopy(base_requests)
-        sim3.run()
-        approach = "Multi-criteria"
-        sim3.print_stats(approach, edge_num, DEFAULT_ARRIVAL, None, None)
-        sim3.save_response_logs(approach)
-        sim3.save_response_logs2(approach)
-    else:
-        print("***************************  DIFFERENT EDGE SERVERS  **********************************")
-        log_diffEdge = []
-        for edge_num in range(2,21):
-            print("EDGE_NUM:  ", edge_num)
-            sim1 = Simulator(edge_nodes=build_nodes(edge_num, None), models=models, duration=60, decision_maker=DecisionMaker_energy_priority())
-            sim1.request_sets = copy.deepcopy(base_requests)
-            sim1.run()
-            approach = "Energy-aware"
-            sim1.print_stats(approach, edge_num, DEFAULT_ARRIVAL, None, log_diffEdge)
-            sim1.save_response_logs(approach)
-            
-            sim2 = Simulator(edge_nodes=build_nodes(edge_num, None), models=models, duration=60, decision_maker = DecisionMaker_energy_request_priority())
-            sim2.request_sets = copy.deepcopy(base_requests)
-            sim2.run()
-            approach = "Deadline-energy-aware"
-            sim2.print_stats(approach, edge_num, DEFAULT_ARRIVAL, None, log_diffEdge)
-            sim2.save_response_logs(approach)
-
-            sim3 = Simulator(edge_nodes=build_nodes(edge_num, None), models=models, duration=60, decision_maker = DecisionMaker_edgeParams_request_priority())
-            sim3.request_sets = copy.deepcopy(base_requests)
-            sim3.run()
-            approach = "Multi-criteria"
-            sim3.print_stats(approach, edge_num, DEFAULT_ARRIVAL, None, log_diffEdge)
-            sim3.save_response_logs(approach)
-                    
+    edge_num = DEFAULT_EDGE_NUM        
     
-        pd.DataFrame(log_diffEdge).to_csv("log_diffEdge.csv", index=False)
+    sim1 = Simulator(edge_nodes=build_nodes(edge_num, None), models=models, duration=60, decision_maker= DecisionMaker_energy_aware())
+    sim1.request_sets = copy.deepcopy(base_requests)
+    sim1.run()
+    approach = "Energy-aware"
+    sim1.print_stats(approach, edge_num, DEFAULT_ARRIVAL, None)
+    sim1.save_response_logs(approach)
 
-
-        
-        print("***************************  DIFFERENT ENERGY LEVEL  **********************************")
-        edge_num = DEFAULT_EDGE_NUM  # Number of edge servers by default
-        log_diffEnergy = []
-        scal_param = [
-            (1/100),
-            (1/50),
-            (1/10),
-            (1/2),
-            (1)
-        ]
-        
-        for param in scal_param:
-            print("param:  ", param)
-            sim1 = Simulator(edge_nodes=build_nodes(edge_num, param), models=models, duration=60, decision_maker=DecisionMaker_energy_priority())
-            sim1.request_sets = copy.deepcopy(base_requests)
-            sim1.run()
-            approach = "Energy-aware"
-            sim1.print_stats(approach, edge_num, DEFAULT_ARRIVAL, param, log_diffEnergy)
-
-            
-            sim2 = Simulator(edge_nodes=build_nodes(edge_num, param), models=models, duration=60, decision_maker=DecisionMaker_energy_request_priority())
-            sim2.request_sets = copy.deepcopy(base_requests)
-            sim2.run()
-            approach = "Deadline-energy-aware"
-            sim2.print_stats(approach, edge_num, DEFAULT_ARRIVAL, param, log_diffEnergy)
-
-            sim3 = Simulator(edge_nodes=build_nodes(edge_num, param), models=models, duration=60, decision_maker=DecisionMaker_edgeParams_request_priority())
-            sim3.request_sets = copy.deepcopy(base_requests)
-            sim3.run()
-            approach = "Multi-criteria"
-            sim3.print_stats(approach, edge_num, DEFAULT_ARRIVAL, param, log_diffEnergy)
-            
     
-        pd.DataFrame(log_diffEnergy).to_csv("log_diffEnergy.csv", index=False)
-        
-        print("************************  DIFFERENT ARRIVAL RATE  **********************************")
-        
-        log_diffArrv = []
-        edge_num = DEFAULT_EDGE_NUM  # Number of edge servers by default
-        diff_arrivals = [15,13,10,5,4,3,2,1]
-        for idx, arrv in enumerate(diff_arrivals):
-            base_requests = generate_requestSet(arrv)
-            sim1 = []
-            sim1 = Simulator(edge_nodes=build_nodes(edge_num, None), models=models, duration=60, decision_maker=DecisionMaker_energy_priority())
-            sim1.request_sets = copy.deepcopy(base_requests)
-            sim1.run()
-            approach = "Energy-aware"
-            sim1.print_stats(approach, edge_num, idx, None, log_diffArrv)
-            sim1.save_response_logs(approach)
-            
-            sim2 = []
-            sim2 = Simulator(edge_nodes=build_nodes(edge_num, None), models=models, duration=60, decision_maker = DecisionMaker_energy_request_priority())
-            sim2.request_sets = copy.deepcopy(base_requests)
-            sim2.run()
-            approach = "Deadline-energy-aware"
-            sim2.print_stats(approach, edge_num, idx, None, log_diffArrv)
-            sim2.save_response_logs(approach)
+    sim2 = Simulator(edge_nodes=build_nodes(edge_num, None), models=models, duration=60, decision_maker = DecisionMaker_deadline_energy_aware())
+    sim2.request_sets = copy.deepcopy(base_requests)
+    sim2.run()
+    approach = "Deadline-energy-aware"
+    sim2.print_stats(approach, edge_num, DEFAULT_ARRIVAL, None)
+    sim2.save_response_logs(approach)
 
-            sim3 = []
-            sim3 = Simulator(edge_nodes=build_nodes(edge_num, None), models=models, duration=60, decision_maker = DecisionMaker_edgeParams_request_priority())
-            sim3.request_sets = copy.deepcopy(base_requests)
-            sim3.run()
-            approach = "Multi-criteria"
-            sim3.print_stats(approach, edge_num, idx, None, log_diffArrv)
-            sim3.save_response_logs(approach)
-                    
     
-        pd.DataFrame(log_diffArrv).to_csv("log_diffArrv.csv", index=False)
+    sim3 = Simulator(edge_nodes=build_nodes(edge_num, None), models=models, duration=60, decision_maker = DecisionMaker_multi_criteria())
+    sim3.request_sets = copy.deepcopy(base_requests)
+    sim3.run()
+    approach = "Multi-criteria"
+    sim3.print_stats(approach, edge_num, DEFAULT_ARRIVAL, None)
+    sim3.save_response_logs(approach)
 
     
     
